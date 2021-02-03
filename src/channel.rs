@@ -1,8 +1,9 @@
 use std::ops::Deref;
 use std::ptr;
 
-use std::sync::mpsc::{SendError, RecvError, TryRecvError};
+use std::sync::mpsc::{SendError, RecvError, TryRecvError, RecvTimeoutError};
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use loom::sync::{Arc, Mutex, CausalCell, Condvar};
 use loom::sync::atomic::{AtomicPtr, AtomicBool, AtomicUsize};
@@ -127,7 +128,47 @@ impl<T: Send> Receiver<T> {
                 },
                 Err(TryRecvError::Empty) => {}
             }
-            guard = self.inner.sleeping_condvar.wait(guard).unwrap();
+            guard = self.inner.sleeping_condvar.wait_timeout(guard).unwrap();
+        }
+
+        self.inner.num_sleeping.fetch_sub(1, Ordering::SeqCst);
+        ret
+    }
+
+    /// Receive a message from the channel.
+    ///
+    /// If no message is available, this will block the current thread until a
+    /// message is sent.
+    pub fn recv_timeout(&self, dur: Duration) -> Result<T, RecvTimeoutError> {
+        match self.try_recv() {
+            Ok(t) => return Ok(t),
+            Err(TryRecvError::Disconnected) => return Err(RecvError),
+            Err(TryRecvError::Empty) => {},
+        }
+
+
+        let ret;
+        let mut timer_err;
+        let mut guard = self.inner.sleeping_guard.lock().unwrap();
+        self.inner.num_sleeping.fetch_add(1, Ordering::SeqCst);
+
+        loop {
+            match self.try_recv() {
+                Ok(t) => {
+                    ret = Ok(t);
+                    break;
+                },
+                Err(TryRecvError::Disconnected) => {
+                    ret = Err(RecvTimeoutError::Disconnected);
+                    break;
+                },
+                Err(TryRecvError::Empty) => {}
+            }
+            (guard, timer_err) = self.inner.sleeping_condvar.wait_timeout(guard, dur).unwrap();
+            if timer_err.timed_out() {
+                ret = Err(RecvTimeoutError::Timeout);
+                break;
+            }
         }
 
         self.inner.num_sleeping.fetch_sub(1, Ordering::SeqCst);
