@@ -142,13 +142,12 @@ impl<T: Send> Receiver<T> {
     pub fn recv_timeout(&self, dur: Duration) -> Result<T, RecvTimeoutError> {
         match self.try_recv() {
             Ok(t) => return Ok(t),
-            Err(TryRecvError::Disconnected) => return Err(RecvError),
+            Err(TryRecvError::Disconnected) => return Err(RecvTimeoutError::Disconnected),
             Err(TryRecvError::Empty) => {},
         }
 
 
         let ret;
-        let mut timer_err;
         let mut guard = self.inner.sleeping_guard.lock().unwrap();
         self.inner.num_sleeping.fetch_add(1, Ordering::SeqCst);
 
@@ -164,8 +163,9 @@ impl<T: Send> Receiver<T> {
                 },
                 Err(TryRecvError::Empty) => {}
             }
-            (guard, timer_err) = self.inner.sleeping_condvar.wait_timeout(guard, dur).unwrap();
-            if timer_err.timed_out() {
+            let res = self.inner.sleeping_condvar.wait_timeout(guard, dur).unwrap();
+            guard = res.0;
+            if res.1.timed_out() {
                 ret = Err(RecvTimeoutError::Timeout);
                 break;
             }
