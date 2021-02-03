@@ -128,7 +128,7 @@ impl<T: Send> Receiver<T> {
                 },
                 Err(TryRecvError::Empty) => {}
             }
-            guard = self.inner.sleeping_condvar.wait_timeout(guard).unwrap();
+            guard = self.inner.sleeping_condvar.wait(guard).unwrap();
         }
 
         self.inner.num_sleeping.fetch_sub(1, Ordering::SeqCst);
